@@ -1,0 +1,147 @@
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fitness_user_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5433:5432"  # host 5433 — local Postgres often uses 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.0
+    container_name: keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8181:8080"
+    command: start-dev
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nhost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; timeout 5 cat <&3 | grep -q '200'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  keycloak-setup:
+    image: quay.io/keycloak/keycloak:24.0.0
+    container_name: keycloak-setup
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      KC_PUBLIC_URL: http://keycloak:8080
+      KC_ADMIN_URL: http://keycloak:8080
+    volumes:
+      - ./scripts/keycloak-init.sh:/opt/keycloak-init.sh:ro
+    entrypoint: ["/bin/bash", "/opt/keycloak-init.sh"]
+    restart: "no"
+
+  config-server:
+    image: config-server
+    container_name: config-server
+    ports:
+      - "8888:8888"
+    restart: unless-stopped
+
+  eureka-server:
+    image: eureka-server
+    container_name: eureka-server
+    ports:
+      - "8761:8761"
+    restart: unless-stopped
+    depends_on:
+      - config-server
+
+  user-service:
+    image: user-service
+    container_name: user-service
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - config-server
+      - eureka-server
+
+  activity-service:
+    image: activity-service
+    container_name: activity-service
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+      - rabbitmq
+      - config-server
+      - eureka-server
+
+  ai-service:
+    image: ai-service
+    container_name: ai-service
+    ports:
+      - "8083:8083"
+    restart: unless-stopped
+    environment:
+      GEMINI_API_URL: ${GEMINI_API_URL}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      - mongodb
+      - rabbitmq
+      - config-server
+      - eureka-server
+
+  api-gateway:
+    image: api-gateway
+    container_name: api-gateway
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/fitness-app/protocol/openid-connect/certs
+    depends_on:
+      - keycloak
+      - config-server
+      - eureka-server
+      - user-service
+      - activity-service
+      - ai-service
+
+  frontend:
+    image: fitness-frontend
+    container_name: fitness-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      keycloak-setup:
+        condition: service_completed_successfully
+      api-gateway:
+        condition: service_started
+
+volumes:
+  keycloak_data:
+  postgres_data:
+  mongodb_data:
